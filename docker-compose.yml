@@ -1,0 +1,118 @@
+services:
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=${EMAIL}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "./letsencrypt:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - proxy_net
+
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: horilla
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d horilla"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - default
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - default
+
+  web:
+    image: ghcr.io/harishm-aiml-a-58/tendworks-web:latest
+    restart: unless-stopped
+    environment:
+      DEBUG: "False"
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: "*"
+      CSRF_TRUSTED_ORIGINS: "https://${DOMAIN}"
+      DB_ENGINE: "django.db.backends.postgresql"
+      DB_NAME: "horilla"
+      DB_USER: "postgres"
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: "db"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+      GUNICORN_WORKERS: 9
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - default
+      - proxy_net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy_net"
+      - "traefik.http.routers.tendworks.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.tendworks.entrypoints=websecure"
+      - "traefik.http.routers.tendworks.tls=true"
+      - "traefik.http.routers.tendworks.tls.certresolver=myresolver"
+
+  celery:
+    image: ghcr.io/harishm-aiml-a-58/tendworks-celery:latest
+    restart: unless-stopped
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      DB_ENGINE: "django.db.backends.postgresql"
+      DB_NAME: "horilla"
+      DB_USER: "postgres"
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: "db"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://redis:6379/0"
+      CELERY_RESULT_BACKEND: "redis://redis:6379/1"
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - default
+
+volumes:
+  postgres_data:
+  redis_data:
+  media_data:
+
+networks:
+  proxy_net:
+  default:
